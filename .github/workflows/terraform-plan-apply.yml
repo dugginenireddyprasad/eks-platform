@@ -1,0 +1,143 @@
+name: Terraform — Plan & Apply
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+
+env:
+  TF_VERSION: '1.7.5'
+  AWS_REGION: 'us-east-1'
+  WORKING_DIR: 'terraform/environments/dev'
+
+jobs:
+  # ─────────────────────────────────────────
+  # Job 1: Terraform Plan (runs on every PR)
+  # ─────────────────────────────────────────
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.WORKING_DIR }}
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+        working-directory: ${{ env.WORKING_DIR }}
+        continue-on-error: true
+
+      - name: Post Plan as PR Comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.WORKING_DIR }}/plan_output.txt', 'utf8');
+            const maxLength = 65000;
+            const truncated = plan.length > maxLength
+              ? plan.substring(0, maxLength) + '\n\n... output truncated ...'
+              : plan;
+            const output = `## Terraform Plan 📋
+            #### Format: \`${{ steps.fmt.outcome }}\`
+            #### Init: \`${{ steps.init.outcome }}\`
+            #### Validate: \`${{ steps.validate.outcome }}\`
+            #### Plan: \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${truncated}
+            \`\`\`
+
+            </details>
+
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  # ─────────────────────────────────────────
+  # Job 2: Terraform Apply (runs on merge to main)
+  # ─────────────────────────────────────────
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production   # Requires manual approval in GitHub
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: Notify Slack on apply
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: "${{ job.status == 'success' && '✅' || '❌' }} *Terraform apply* `${{ job.status }}` on `${{ env.WORKING_DIR }}`"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

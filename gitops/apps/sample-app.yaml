@@ -1,0 +1,37 @@
+# gitops/apps/sample-app.yaml
+# ArgoCD watches this file — any change to the Helm chart or values
+# in the repo triggers an automatic sync to the cluster
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sample-app
+  namespace: argocd
+  # Cascade delete: removing this file removes the app AND its K8s resources
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/YOUR-USERNAME/eks-platform.git
+    targetRevision: HEAD
+    path: helm/apps/sample-app
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sample-app
+
+  syncPolicy:
+    automated:
+      prune: true       # remove resources deleted from git
+      selfHeal: true    # revert manual kubectl changes
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

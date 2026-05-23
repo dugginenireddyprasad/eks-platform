@@ -1,0 +1,7 @@
+# helm/apps/sample-app/Chart.yaml
+apiVersion: v2
+name: sample-app
+description: Sample application deployed via GitOps on EKS
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

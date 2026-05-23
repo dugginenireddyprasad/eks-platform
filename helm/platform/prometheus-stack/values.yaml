@@ -1,0 +1,136 @@
+# helm/platform/prometheus-stack/values.yaml
+# kube-prometheus-stack — covers Prometheus, Grafana, Alertmanager, node-exporter
+
+grafana:
+  enabled: true
+  adminPassword: "change-me-immediately"   # override via --set or external secret
+
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          orgId: 1
+          folder: ""
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+  # Pre-load community dashboards by ID
+  dashboards:
+    default:
+      kubernetes-cluster:
+        gnetId: 7249       # Kubernetes cluster overview
+        revision: 1
+        datasource: Prometheus
+      node-exporter:
+        gnetId: 1860       # Node exporter full
+        revision: 37
+        datasource: Prometheus
+      argocd:
+        gnetId: 14584      # ArgoCD dashboard
+        revision: 1
+        datasource: Prometheus
+
+prometheus:
+  prometheusSpec:
+    retention: 15d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+
+    # Scrape all ServiceMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+  config:
+    global:
+      resolve_timeout: 5m
+      slack_api_url: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+
+    route:
+      group_by: ["alertname", "namespace"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: "slack-notifications"
+      routes:
+        - match:
+            severity: critical
+          receiver: "slack-critical"
+
+    receivers:
+      - name: "slack-notifications"
+        slack_configs:
+          - channel: "#alerts"
+            title: '{{ .GroupLabels.alertname }}'
+            text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+            send_resolved: true
+
+      - name: "slack-critical"
+        slack_configs:
+          - channel: "#alerts-critical"
+            title: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+            text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+            send_resolved: true
+
+# Custom alerting rules
+additionalPrometheusRulesMap:
+  custom-rules:
+    groups:
+      - name: pod-health
+        rules:
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
+              description: "Container {{ $labels.container }} has restarted {{ $value }} times in the last 15 minutes"
+
+          - alert: PodNotReady
+            expr: kube_pod_status_ready{condition="false"} == 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} not ready for 10m"
+
+      - name: node-health
+        rules:
+          - alert: NodeHighCPU
+            expr: (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (node)) * 100 > 85
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Node {{ $labels.node }} CPU > 85%"
+
+          - alert: NodeDiskRunningFull
+            expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 15
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Node {{ $labels.instance }} disk < 15% free"
